@@ -27,6 +27,7 @@ type ExportData struct {
 	Users       []User       `json:"users" yaml:"users"`
 	GlobalRoles []Role       `json:"global_roles" yaml:"global_roles"`
 	ItemsRoles  []Role       `json:"items_roles" yaml:"items_roles"`
+	SlaveRoles  []Role       `json:"slave_roles" yaml:"slave_roles"`
 	Membership  []Membership `json:"membership" yaml:"membership"`
 }
 
@@ -37,8 +38,8 @@ type User struct {
 }
 
 type Role struct {
-	Name        string       `json:"name" yaml:"name"`
-	Permissions []Permission `json:"permissions" yaml:"permissions"`
+	Name        string   `json:"name" yaml:"name"`
+	Permissions []string `json:"permissions" yaml:"permissions"`
 }
 
 type Permission struct {
@@ -78,3 +79,8 @@ type RoleMember struct {
 }
 
 type JenkinsRolesResponse map[string][]RoleMember
+
+type JenkinsRolePermissionResponse struct {
+	PermissionsIds map[string]bool `json:"permissionIds"`
+	Sids           []UserEntry     `json:"sids"`
+}

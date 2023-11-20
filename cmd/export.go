@@ -27,6 +27,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"time"
 
 	"net/http"
@@ -39,6 +40,7 @@ import (
 var (
 	aacPath      *string
 	outputFormat *string
+	verbose      *bool
 )
 
 // exportCmd represents the export command
@@ -60,6 +62,7 @@ func init() {
 	rootCmd.AddCommand(exportCmd)
 
 	aacPath = exportCmd.Flags().StringP("path", "p", "access-config.yaml", "Path to the output YAML file")
+	verbose = exportCmd.Flags().Bool("v", false, "Verbose all responses")
 
 	outputFormat = exportCmd.Flags().StringP("format", "f", "yaml", "Format of access-config. By default yaml. Option json yaml")
 
@@ -68,26 +71,22 @@ func init() {
 
 func exportData() {
 	jenkinsURL := viper.GetString("jenkins_url")
-	jenkinsToken := viper.GetString("adm_url")
+	jenkinsToken := viper.GetString("admin_token")
+	jenkinsUser := viper.GetString("admin_user")
 
 	var (
 		accessConfig ExportData
-		users        JenkinsUsersResponse
-		globalRoles  JenkinsRolesResponse
-		// itemRoles    JenkinsRolesResponse
-		err error
+		err          error
 	)
 
 	accessConfig.ExtractDate = time.Now().Format("2006-01-02")
 	accessConfig.JenkinsURL = jenkinsURL
 
-	users, err = getUsers(jenkinsURL, jenkinsToken)
-
 	if err != nil {
 		log.Panic("Error getting users", err)
 	}
 
-	for _, user := range users.Users {
+	for _, user := range getUsers(jenkinsURL, jenkinsUser, jenkinsToken).Users {
 		var newUser User = User{
 			FullName: user.User.FullName,
 			Login:    user.User.ID,
@@ -101,17 +100,13 @@ func exportData() {
 		accessConfig.Users = append(accessConfig.Users, newUser)
 	}
 
-	globalRoles, err = getRoles("globalRoles", jenkinsURL, jenkinsToken)
+	for roleName, members := range getRoles("globalRoles", jenkinsURL, jenkinsUser, jenkinsToken) {
 
-	for roleName, members := range globalRoles {
-
-		newRole := Role{
+		accessConfig.GlobalRoles = append(accessConfig.GlobalRoles, Role{
 			Name: roleName,
-		}
-
-		accessConfig.GlobalRoles = append(accessConfig.GlobalRoles, newRole)
+		})
 		newMembership := Membership{
-			RoleName: newRole.Name,
+			RoleName: roleName,
 			RoleType: "global",
 		}
 
@@ -122,70 +117,165 @@ func exportData() {
 		accessConfig.Membership = append(accessConfig.Membership, newMembership)
 	}
 
-	// itemRoles, err = getRoles("projectRoles", jenkinsURL, jenkinsToken)
+	for roleName, members := range getRoles("projectRoles", jenkinsURL, jenkinsUser, jenkinsToken) {
+
+		accessConfig.ItemsRoles = append(accessConfig.ItemsRoles, Role{
+			Name: roleName,
+		})
+		newMembership := Membership{
+			RoleName: roleName,
+			RoleType: "item",
+		}
+
+		for _, member := range members {
+			newMembership.Members = append(newMembership.Members, member.SID)
+		}
+
+		accessConfig.Membership = append(accessConfig.Membership, newMembership)
+	}
+
+	for roleName, members := range getRoles("slaveRoles", jenkinsURL, jenkinsUser, jenkinsToken) {
+
+		newRole := Role{
+			Name: roleName,
+		}
+
+		accessConfig.SlaveRoles = append(accessConfig.SlaveRoles, newRole)
+		newMembership := Membership{
+			RoleName: newRole.Name,
+			RoleType: "item",
+		}
+
+		for _, member := range members {
+			newMembership.Members = append(newMembership.Members, member.SID)
+		}
+
+		accessConfig.Membership = append(accessConfig.Membership, newMembership)
+	}
+
+	getRolesPermissions("globalRoles", jenkinsURL, jenkinsUser, jenkinsToken, &(accessConfig.GlobalRoles))
+	getRolesPermissions("projectRoles", jenkinsURL, jenkinsUser, jenkinsToken, &(accessConfig.ItemsRoles))
+	getRolesPermissions("slaveRoles", jenkinsURL, jenkinsUser, jenkinsToken, &(accessConfig.SlaveRoles))
+
+	saveConfig("test-agus", &accessConfig)
 }
 
-func getUsers(jenkinsURL, apiToken string) (JenkinsUsersResponse, error) {
+func getUsers(jenkinsURL, jenkinsUser, apiToken string) JenkinsUsersResponse {
 	client := &http.Client{}
 	var users JenkinsUsersResponse
 
 	req, err := http.NewRequest("GET", jenkinsURL+"asynchPeople/api/json?tree=users[user[fullName,id,mail,property[address]]]", nil)
 	if err != nil {
-		return users, err
+		// return users, err
+		log.Panic(err)
+
 	}
 
-	req.Header.Add("Authorization", "Bearer "+apiToken)
+	req.SetBasicAuth(jenkinsUser, apiToken)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return users, err
+		log.Panic(err)
+
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return users, err
+		log.Panic(err)
 	}
-
 	err = json.Unmarshal(body, &users)
 	if err != nil {
-		return users, err
+		log.Panic(err)
+
 	}
 
-	return users, nil
+	return users
 }
 
-func getRoles(scope, jenkinsURL, apiToken string) (JenkinsRolesResponse, error) {
+func getRoles(roleScope, jenkinsURL, jenkinsUser, apiToken string) JenkinsRolesResponse {
 	client := &http.Client{}
 	var roles JenkinsRolesResponse
 
-	req, err := http.NewRequest("GET", jenkinsURL+"asynchPeople/api/json?tree=users[user[fullName,id,mail,property[address]]]", nil)
+	req, err := http.NewRequest("GET", jenkinsURL+"role-strategy/strategy/getAllRoles?type="+roleScope, nil)
 	if err != nil {
-		return roles, err
+		log.Panic(err)
 	}
 
-	req.Header.Add("Authorization", "Bearer "+apiToken)
+	req.SetBasicAuth(jenkinsUser, apiToken)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return roles, err
+		log.Panic(err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return roles, err
+		log.Panic(err)
 	}
+
+	// fmt.Printf("%s\\n", body)
 
 	err = json.Unmarshal(body, &roles)
 	if err != nil {
-		return roles, err
+		log.Panic(err)
 	}
 
-	return roles, nil
+	return roles
 }
 
-func LoadConfig(filename string) (*ExportData, error) {
+func getRolesPermissions(roleScope, jenkinsURL, jenkinsUser, apiToken string, currentRoles *[]Role) {
+	var (
+		client           http.Client
+		url              string
+		rolesPermissions JenkinsRolePermissionResponse
+	)
+
+	for item, role := range *currentRoles {
+
+		url = jenkinsURL + "role-strategy/strategy/getRole?type=" + roleScope + "&roleName=" + role.Name
+		rolesPermissions = JenkinsRolePermissionResponse{}
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			log.Panic(err)
+		}
+		req.SetBasicAuth(jenkinsUser, apiToken)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Panic(err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		if *verbose {
+			log.Printf("\n URL=%s \n Response=\n %s\n", url, body)
+		}
+
+		err = json.Unmarshal(body, &rolesPermissions)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		rolePermissions := make([]string, 0)
+		for permission, _ := range rolesPermissions.PermissionsIds {
+			rolePermissions = append(rolePermissions, permission)
+		}
+
+		sort.Strings(rolePermissions)
+
+		(*currentRoles)[item].Permissions = rolePermissions
+	}
+
+}
+
+func loadConfig(filename string) (*ExportData, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
@@ -199,7 +289,7 @@ func LoadConfig(filename string) (*ExportData, error) {
 }
 
 // SaveConfig saves the configuration to a YAML file.
-func SaveConfig(filename string, config *ExportData) error {
+func saveConfig(filename string, config *ExportData) error {
 
 	var data []byte
 	var err error
